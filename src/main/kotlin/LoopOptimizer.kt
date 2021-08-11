@@ -34,8 +34,8 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
                 .forEach {
                     loopPhis[it] = loop
                 }
-            loop.body.forEach {
-                it.forEach {
+            loop.body.forEach { basicBlock ->
+                basicBlock.forEach {
                     inst2loop.getOrPut(it) { loop }
                 }
             }
@@ -74,13 +74,15 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
         val unused = mutableListOf<Instruction>()
         for (b in loop.body) {
             for (i in b) {
-                if (i is BinaryInst) {
-                    if (i.users.isEmpty()) {
-                        unused += i
-                    }
+                if (i is BinaryInst || i is PhiInst)
+                if (i.users.isEmpty()) {
+                    unused += i
                 }
             }
-            unused.forEach { b.remove(it) }
+            unused.forEach {
+                it.clearUses()
+                b -= it
+            }
             unused.clear()
         }
     }
@@ -106,13 +108,13 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
     }
 
     private fun insertInductive(loop: Loop) {
-        val ONE = values.getInt(1)
+        val one = values.getInt(1)
         val tmpPhi = instructions.getPhi(IntType, mapOf())
 
-        val newInstruction = instructions.getBinary(BinaryOpcode.ADD, ONE, tmpPhi.get())
+        val newInstruction = instructions.getBinary(BinaryOpcode.ADD, one, tmpPhi.get())
         val newPhi = instructions.getPhi(
             IntType,
-            mapOf(Pair(loop.preheader, ONE), Pair(loop.latch, newInstruction.get()))
+            mapOf(Pair(loop.preheader, one), Pair(loop.latch, newInstruction.get()))
         )
         freshValues[freshVars[loop]!!] = newPhi.get()
         tmpPhi.replaceAllUsesWith(newPhi)
@@ -124,22 +126,21 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
         insertBefore(loop.latch, updater, loop)
     }
 
-    private fun reconstructPhi(phi: PhiInst, loopValue: Value): List<Instruction>? {
+    private fun reconstructPhi(phi: PhiInst, collector: MutableList<Instruction>): Value? {
         println(phi.print())
         val evo = phiToEvo[phi] ?: return null
         println(evo)
         println()
-        val li = mutableListOf<Instruction>()
-        evo.generateCode(li) ?: return null
-        return li
+        return evo.generateCode(collector)
     }
 
     private fun Symbolic.generateCode(collector: MutableList<Instruction>): Value? {
         return when (this) {
             is Sum -> this.generateCode(collector)
-            is Const -> this.generateCode(collector)
+            is Const -> this.generateCode()
             is Var -> this.generateCode()
-            is Apply -> this.generateCode(collector)
+            is Shift -> this.generateCode(collector)
+            is Apply -> null
             is Product -> this.generateCode(collector)
         }
     }
@@ -213,7 +214,7 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
         return divLcm
     }
 
-    private fun Const.generateCode(li: MutableList<Instruction>): Value? {
+    private fun Const.generateCode(): Value? {
         return values.getConstant(this.value.wholePart)
     }
 
@@ -222,7 +223,11 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
     }
 
     private fun Apply.generateCode(collector: MutableList<Instruction>): Value? {
-        return null
+        return when (this) {
+            is ShiftRight -> generateCode(collector)
+            is ShiftLeft -> generateCode(collector)
+            else -> null
+        }
     }
 
     private fun ShiftLeft.generateCode(collector: MutableList<Instruction>): Value? {
@@ -247,22 +252,20 @@ class LoopOptimizer(cm: ClassManager) : Evolutions(cm), LoopVisitor {
         return collector.last()
     }
 
-    fun lcm(a: Long, b: Long): Long = (a / gcd(a, b)) * b
+    private fun lcm(a: Long, b: Long): Long = (a / gcd(a, b)) * b
 
     private fun rebuild(loop: Loop) {
         val phies = loop.body.flatMap { it.instructions }.mapNotNull { it as? PhiInst }
             .mapNotNull { if (phiToEvo.containsKey(it)) it else null }
         val phiBlock = loop.header
-        val loopVarValue = freshValues[freshVars[loop]!!]!!
         phies.forEach {
-            val li = reconstructPhi(it, loopVarValue)
-            if (li != null && li.isNotEmpty()) {
+            val li = mutableListOf<Instruction>()
+            val res = reconstructPhi(it, li)
+            if (res != null) {
                 val newBlock = BodyBlock("loop.block")
                 newBlock.addAll(li)
                 insertBefore(phiBlock.successors.first(), newBlock, loop)
-                it.replaceAllUsesWith(li.last())
-                it.clearUses()
-                phiBlock -= it
+                it.replaceAllUsesWith(res)
             }
         }
     }

@@ -35,7 +35,7 @@ class MethodPrinter(override val cm: ClassManager) : MethodVisitor {
 
 fun main() {
 
-    val jar = JarContainer("src/main/resources/tests.jar", "poly")
+    val jar = JarContainer("src/main/resources/tests.jar", "shlTwice")
 
     val classManager = ClassManager(KfgConfig(Flags.readAll, true, verifyIR = false))
     classManager.initialize(jar)
@@ -46,5 +46,6 @@ fun main() {
         +LoopOptimizer(classManager)
         +MethodPrinter(classManager)
     }
+    jar.unpack(classManager, Path("unpack"), failOnError = true)
     jar.update(classManager, Path("rebuild"))
 }
